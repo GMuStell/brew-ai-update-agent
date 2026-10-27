@@ -1,0 +1,10 @@
+
+# Generated data and local backups
+state/
+archive/
+
+# Local files and secrets
+.DS_Store
+*.log
+.env
+.env.*
