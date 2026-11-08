@@ -1,6 +1,6 @@
 # Brew AI Update Agent
 
-Automatyczny doradca aktualizacji Homebrew dla developerskiego Maca.
+Automatyczny doradca aktualizacji Homebrew dla Maca.
 
 > Agent sprawdza dostepne aktualizacje, przygotowuje rekomendacje AI i zapisuje raport. Nie wykonuje automatycznie `brew upgrade`. Decyzja o instalacji nalezy do uzytkownika.
 
@@ -31,7 +31,7 @@ Dokument nie jest potwierdzeniem bezpieczenstwa ani poprawnosci wszystkich rekom
 
 ## Cel i zakres
 
-Na developerskim komputerze aktualizacja JDK, Pythona, Node, Terraform lub CLI moze wplynac na projekty. Sama lista `brew outdated` nie wyjasnia znaczenia zmiany. Agent laczy liste wersji z analiza AI i kontekstem toolchainu.
+Aktualizacja JDK, Pythona, Node, Terraform lub CLI moze wplynac na projekty. Sama lista `brew outdated` nie wyjasnia znaczenia zmiany. Agent laczy liste wersji z analiza AI i kontekstem toolchainu.
 
 Projekt ma:
 
