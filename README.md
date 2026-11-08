@@ -1,369 +1,320 @@
 # Brew AI Update Agent
 
-Automatyczny doradca aktualizacji Homebrew dla Maca.
+Brew AI Update Agent to lokalny doradca aktualizacji Homebrew dla macOS. Raz w tygodniu sprawdza nieaktualne formuły i caski, wykorzystuje GitHub Copilot CLI do przygotowania rekomendacji i zapisuje czytelny raport Markdown.
 
-> Agent sprawdza dostepne aktualizacje, przygotowuje rekomendacje AI i zapisuje raport. Nie wykonuje automatycznie `brew upgrade`. Decyzja o instalacji nalezy do uzytkownika.
+> Agent nie wykonuje automatycznie `brew upgrade`. Decyzja o instalacji aktualizacji zawsze należy do użytkownika.
 
-## Status dokumentacji
+## Najważniejsze funkcje
 
-Dokument opisuje projekt rozwijany lokalnie i jego potwierdzona konfiguracje po konsolidacji katalogow. Aktywny skrypt znajduje sie w `bin/`, dane w `state/`, a konfiguracja w `config/`.
+- sprawdzanie aktualizacji Homebrew;
+- analiza dostępnych aktualizacji przy użyciu GitHub Copilot CLI;
+- research release notes;
+- cache rekomendacji ograniczający ponowne analizy;
+- raport `state/latest-report.md`;
+- klasyfikacja:
+  - 🟢 `UPDATE` – aktualizacja rekomendowana;
+  - 🟡 `REVIEW` – przed aktualizacją potrzebna jest dodatkowa kontrola;
+  - 🔴 `HOLD` – aktualizację należy tymczasowo wstrzymać;
+- uruchamianie przez macOS `launchd` w poniedziałek o 08:00;
+- brak automatycznej instalacji pakietów.
 
-**Wazne przed udostepnieniem:** ostatnia migracja i skrypty pomocnicze nie zostaly w calosci przejrzane podczas przygotowywania tego README. Nie zakladamy, ze istnieje gotowy, przenosny instalator dla drugiego komputera. Ponizej znajduje sie jawna procedura instalacji recznej. Przed publikacja nalezy przetestowac ja na drugim koncie lub Macu.
+## Jak działa agent
 
-Dokument nie jest potwierdzeniem bezpieczenstwa ani poprawnosci wszystkich rekomendacji modelu.
-
-## Spis tresci
-
-1. [Cel i zakres](#cel-i-zakres)
-2. [Wymagania](#wymagania)
-3. [Architektura](#architektura)
-4. [Struktura katalogow](#struktura-katalogow)
-5. [Instalacja na drugim Macu](#instalacja-na-drugim-macu)
-6. [Codzienna obsluga](#codzienna-obsluga)
-7. [Cache i koszty AI](#cache-i-koszty-ai)
-8. [Format raportu](#format-raportu)
-9. [Harmonogram](#harmonogram)
-10. [Bezpieczenstwo i ograniczenia](#bezpieczenstwo-i-ograniczenia)
-11. [Diagnostyka](#diagnostyka)
-12. [Udostepnianie projektu](#udostepnianie-projektu)
-13. [Wylaczenie i odinstalowanie](#wylaczenie-i-odinstalowanie)
-14. [Slownik i zrodla](#slownik-i-zrodla)
-
-## Cel i zakres
-
-Aktualizacja JDK, Pythona, Node, Terraform lub CLI moze wplynac na projekty. Sama lista `brew outdated` nie wyjasnia znaczenia zmiany. Agent laczy liste wersji z analiza AI i kontekstem toolchainu.
-
-Projekt ma:
-
-- sprawdzac aktualizacje raz w tygodniu;
-- pokazywac wszystkie nadal oczekujace aktualizacje;
-- analizowac nowe przypadki i okresowo odswiezac stare oceny;
-- rozdzielac fakty z release notes od ogolnych srodkow ostroznosci;
-- podawac korzysci, ryzyka i kontrole przed/po instalacji;
-- ograniczac powtarzanie tych samych zapytan AI;
-- pozostawiac instalowanie aktualizacji czlowiekowi.
-
-Nie jest to skaner podatnosci, system zarzadzania poprawkami ani gwarancja kompatybilnosci. Tygodniowy raport nie zastepuje pilnych komunikatow bezpieczenstwa ani firmowego zarzadzania urzadzeniami.
+```text
+launchd (poniedziałek 08:00)
+  -> bin/brew-ai-update-agent.sh
+  -> aktualizacja metadanych Homebrew
+  -> odczyt brew outdated
+  -> sprawdzenie cache
+  -> analiza nowych lub przeterminowanych pozycji przez Copilot CLI
+  -> walidacja odpowiedzi
+  -> aktualizacja cache
+  -> wygenerowanie state/latest-report.md
+  -> zapis logów
+```
 
 ## Wymagania
 
-- macOS z sesja uzytkownika i `launchd`;
-- Homebrew dostepny jako `brew`;
-- Python 3 dostepny jako `python3`;
-- GitHub Copilot CLI dostepny jako `copilot`;
-- uwierzytelnione konto z dostepem do CLI i mozliwoscia wykonywania analiz;
-- dostep do internetu dla Homebrew, Copilota i researchu;
-- prawo zapisu w katalogu projektu i `~/Library/LaunchAgents`.
+- macOS;
+- Zsh;
+- Homebrew;
+- Python 3;
+- Git;
+- GitHub Copilot CLI skonfigurowany i uwierzytelniony;
+- możliwość zapisu do katalogu projektu i `~/Library/LaunchAgents`.
 
-VS Code jest opcjonalny. Raport mozna czytac w dowolnym edytorze Markdown.
+Sprawdzenie narzędzi:
 
-Sprawdzenie narzedzi:
-
-```bash
+```zsh
 command -v brew
 command -v python3
 command -v copilot
+command -v git
+
 brew --version
 python3 --version
 copilot --version
+git --version
 ```
 
-Komendy pokazuja lokalizacje i wersje programow. Nie aktualizuja pakietow i nie wysylaja promptu AI.
+Polecenia tylko pokazują lokalizacje i wersje. Nie aktualizują pakietów i nie uruchamiają analizy AI.
 
-Jesli Copilot CLI nie jest zainstalowany, aktualna dokumentacja instalacji znajduje sie w sekcji zrodel. Instalacja przez Homebrew:
-
-```bash
-brew install --cask copilot-cli
-```
-
-`install` instaluje wskazany cask i moze pobrac wymagane komponenty. To zmiana w systemie, nie kontrola tylko do odczytu. Nie instaluj drugiej kopii, jezeli `command -v copilot` juz wskazuje dzialajacy program.
-
-Logowanie:
-
-```bash
-copilot login
-```
-
-Uruchamia uwierzytelnienie i moze zapisac dane sesji CLI. Kazdy wspolpracownik loguje sie na wlasne konto zgodnie z zasadami organizacji. Nie kopiuj cudzych tokenow ani katalogu `~/.copilot`.
-
-Test nieinteraktywny:
-
-```bash
-copilot -p "Reply exactly: BREW_AGENT_OK" -s
-```
-
-`-p` wykonuje jeden prompt i konczy sesje. `-s` ogranicza output do odpowiedzi. Test korzysta z AI i moze zuzyc kredyty oraz zapisac lokalne logi/sesje CLI. Oczekiwana odpowiedz: `BREW_AGENT_OK`.
-
-## Architektura
+## Struktura projektu
 
 ```text
-launchd: poniedzialek 08:00
-  -> /bin/zsh bin/brew-ai-update-agent.sh
-  -> brew update
-  -> brew outdated: formulae + casks
-  -> oczyszczenie danych
-  -> klucz SHA-256 dla kazdej linii aktualizacji
-  -> sprawdzenie cache
-       -> swiezy cache: wykorzystaj ocene
-       -> brak/stary cache: Copilot CLI + research
-  -> walidacja JSON i zapis ocen
-  -> generator Markdown
-  -> state/latest-report.md
-  -> powiadomienie macOS
+brew-ai-update-agent/
+├── .gitignore
+├── README.md
+├── bin/
+│   └── brew-ai-update-agent.sh
+├── config/
+│   └── com.brew-ai-update-agent.plist
+├── scripts/
+│   ├── open-report.sh
+│   ├── run-now.sh
+│   ├── show-log.sh
+│   └── status.sh
+├── state/
+└── archive/
 ```
 
-### Podzial odpowiedzialnosci
+- `bin/brew-ai-update-agent.sh` – główny skrypt agenta;
+- `config/com.brew-ai-update-agent.plist` – konfiguracja LaunchAgenta;
+- `scripts/open-report.sh` – otwieranie lub wyświetlanie raportu;
+- `scripts/run-now.sh` – ręczne zlecenie przebiegu przez `launchd`;
+- `scripts/show-log.sh` – podgląd logu aplikacyjnego;
+- `scripts/status.sh` – podsumowanie stanu, harmonogramu, raportu i logów;
+- `state/` – lokalny cache, raporty i logi;
+- `archive/` – lokalne archiwum.
 
-| Element | Zadanie |
-|---|---|
-| launchd | Uruchomienie procesu wedlug harmonogramu |
-| zsh | Koordynowanie etapow i wywolywanie programow |
-| Homebrew | Informacje o zainstalowanych i dostepnych wersjach |
-| Python | Czyszczenie, JSON, cache, sortowanie i raport |
-| Copilot CLI | Analiza nowych/starych ocen i research |
-| osascript | Wyswietlenie powiadomienia macOS |
-| Uzytkownik | Weryfikacja rekomendacji i decyzja o instalacji |
+Katalogów `state/` i `archive/` nie należy dodawać do repozytorium ani udostępniać innym użytkownikom.
 
-### Co robi Homebrew
+## Instalacja
 
-```bash
-brew update
-brew outdated --formula --verbose
-brew outdated --cask --greedy --verbose
+### 1. Pobierz projekt
+
+```zsh
+mkdir -p "$HOME/Projects/tools"
+cd "$HOME/Projects/tools"
+git clone <REPOSITORY_URL> brew-ai-update-agent
+cd brew-ai-update-agent
 ```
 
-- `update` odswieza Homebrew i informacje o pakietach; moze aktualizowac wewnetrzne komponenty Homebrew, ale nie jest zbiorczym `brew upgrade` aplikacji.
-- `outdated` wyszukuje nieaktualne pakiety.
-- `--formula` wybiera formulae, np. biblioteki i narzedzia CLI.
-- `--cask` wybiera caski, np. aplikacje macOS.
-- `--verbose` pokazuje wersje.
-- `--greedy` uwzglednia takze caski normalnie pomijane, np. z wlasnymi aktualizacjami.
+Zastąp `<REPOSITORY_URL>` właściwym adresem repozytorium.
 
-Agent nie obejmuje automatycznie wszystkiego z App Store, wszystkich rozszerzen VS Code ani zaleznosci projektow npm/pip/sbt.
+### 2. Utwórz lokalne katalogi
 
-## Struktura katalogow
+```zsh
+mkdir -p state/cache archive "$HOME/Library/LaunchAgents"
+```
+
+Polecenie tworzy tylko brakujące katalogi.
+
+### 3. Ustaw prawa wykonywania
+
+```zsh
+chmod +x bin/brew-ai-update-agent.sh scripts/*.sh
+```
+
+### 4. Sprawdź składnię
+
+```zsh
+for file in bin/*.sh scripts/*.sh; do
+  /bin/zsh -n "$file" || exit 1
+  echo "OK: $file"
+done
+```
+
+`zsh -n` sprawdza składnię bez uruchamiania skryptów, Homebrew ani Copilot CLI.
+
+### 5. Przygotuj plist dla swojego Maca
+
+Projektowy plik:
 
 ```text
-~/Projects/tools/brew-ai-update-agent/
-  README.md
-  bin/
-    brew-ai-update-agent.sh
-  config/
-    com.brew-ai-update-agent.plist
-  state/
-    cache/
-    latest-report.md
-    agent.log
-    launchd.stdout.log
-    launchd.stderr.log
-    outdated-raw.txt
-    outdated.txt
-    pending.txt
-    prompt.txt
-    ai-output.json
-  archive/
-    backups/
+config/com.brew-ai-update-agent.plist
 ```
 
-Dodatkowo moga pozostawac historyczne skrypty migracyjne. Nie sa wymaganym etapem nowej instalacji.
-
-Poza projektem pozostaje aktywna konfiguracja:
+używa neutralnego identyfikatora:
 
 ```text
-~/Library/LaunchAgents/com.brew-ai-update-agent.plist
+com.brew-ai-update-agent
 ```
 
-Kopia w `config/` jest plikiem projektu; kopia w `LaunchAgents` jest konfiguracja wdrozona. Zmiana pierwszej nie aktualizuje automatycznie drugiej.
+Jeżeli zawiera placeholder `__PROJECT_ROOT__`, utwórz lokalny plist, podstawiając fizyczną ścieżkę projektu:
 
-### Pliki stanu
+```zsh
+PROJECT_ROOT="$(pwd -P)"
 
-- `outdated-raw.txt`: surowy output Homebrew.
-- `outdated.txt`: oczyszczona lista aktualizacji.
-- `pending.txt`: klucze i przypadki wymagajace analizy AI.
-- `prompt.txt`: ostatni prompt przekazany do modelu.
-- `ai-output.json`: ostatnia odpowiedz AI, przydatna do odzyskiwania i diagnostyki.
-- `cache/*.json`: osobne oceny konkretnych kombinacji wersji.
-- `latest-report.md`: najnowszy raport, nie archiwum wszystkich raportow.
-- `agent.log`: dopisywana historia przebiegow; moze zawierac stare bledy.
-- `launchd.*.log`: output i bledy na poziomie uruchamiania procesu.
-
-## Instalacja na drugim Macu
-
-### 1. Pobierz kod, nie cudzy stan
-
-Umiesc aktualny skrypt `bin/brew-ai-update-agent.sh` i konfiguracje `config/*.plist` w:
-
-```text
-~/Projects/tools/brew-ai-update-agent
+sed "s|__PROJECT_ROOT__|$PROJECT_ROOT|g" \
+  config/com.brew-ai-update-agent.plist \
+  > "$HOME/Library/LaunchAgents/com.brew-ai-update-agent.plist"
 ```
 
-Nie uruchamiaj historycznych patchy v2.1-v2.4 ani migracji v2.5 jako instalatora nowego komputera. Te skrypty zakladaja istnienie poprzedniej instalacji i jej danych.
+`pwd -P` ustala bezwzględną ścieżkę. `sed` tworzy lokalną kopię plista odpowiednią dla bieżącego użytkownika.
 
-### 2. Przygotuj katalogi
+Sprawdź konfigurację:
 
-```bash
-mkdir -p "$HOME/Projects/tools/brew-ai-update-agent/state/cache" \
-         "$HOME/Library/LaunchAgents"
+```zsh
+plutil -lint config/com.brew-ai-update-agent.plist
+plutil -lint "$HOME/Library/LaunchAgents/com.brew-ai-update-agent.plist"
 ```
 
-`mkdir -p` tworzy brakujace katalogi nadrzedne i nie zglasza bledu, jesli juz istnieja. Nie usuwa istniejacych danych.
+Oba polecenia powinny zakończyć się wynikiem `OK`.
 
-### 3. Dostosuj sciezki w skrypcie
+### 6. Załaduj LaunchAgenta
 
-Otworz `bin/brew-ai-update-agent.sh` w edytorze. W lokalnej instalacji potwierdzono bezwzgledna sciezke `STATE_DIR`. Na innym komputerze trzeba ja zmienic. Zalecana przenosna postac:
-
-```bash
-STATE_DIR="$HOME/Projects/tools/brew-ai-update-agent/state"
-```
-
-Nie pozostawiaj sciezki `/Users/...` nalezacej do autora. Sprawdz tez PATH oraz lokalizacje `brew`, `copilot` i `python3`. Skrypt uruchamiany przez launchd nie musi miec tego samego srodowiska co interaktywny terminal.
-
-### 4. Dostosuj kontekst promptu
-
-W skrypcie znajdz prompt i dostosuj opis toolchainu do swojego komputera. Przykladowy kontekst autora obejmuje Java 17/Scala/Metals/sbt, Databricks Bundles, Terraform/TFLint, Node/pnpm, Docker i pyenv/pipx.
-
-Nie zakladaj, ze kazdy wspolpracownik uzywa tych samych narzedzi. Zmiana kontekstu nie uniewaznia automatycznie starego cache; na nowym komputerze zacznij od pustego `state/cache`.
-
-### 5. Dostosuj konfiguracje launchd
-
-W `config/com.brew-ai-update-agent.plist` sprawdz:
-
-- `ProgramArguments`: `/bin/zsh` oraz pelna sciezka do skryptu w `bin/`;
-- `StandardOutPath`: pelna sciezka do `state/launchd.stdout.log`;
-- `StandardErrorPath`: pelna sciezka do `state/launchd.stderr.log`;
-- `Label`: `com.brew-ai-update-agent`;
-- `StartCalendarInterval`: Weekday 1, Hour 8, Minute 0.
-
-W wartosciach plist wpisz rzeczywiste pelne sciezki. Nie zakladaj, ze launchd rozwinie `$HOME` albo `~` jak powloka.
-
-Etykieta moze pozostac taka sama u roznych uzytkownikow. Jesli ja zmienisz, musisz zmienic tez nazwe pliku i wszystkie komendy `launchctl` w tej dokumentacji.
-
-### 6. Sprawdz skladnie
-
-```bash
-zsh -n "$HOME/Projects/tools/brew-ai-update-agent/bin/brew-ai-update-agent.sh"
-plutil -lint "$HOME/Projects/tools/brew-ai-update-agent/config/com.brew-ai-update-agent.plist"
-```
-
-`zsh -n` sprawdza skladnie bez wykonania skryptu. `plutil -lint` sprawdza skladnie plist. Te kontrole nie testuja logowania, internetu, poprawnosci analizy AI ani wszystkich sciezek wykonania.
-
-### 7. Wdroz konfiguracje
-
-```bash
-cp "$HOME/Projects/tools/brew-ai-update-agent/config/com.brew-ai-update-agent.plist" \
-   "$HOME/Library/LaunchAgents/com.brew-ai-update-agent.plist"
+```zsh
 launchctl bootstrap "gui/$(id -u)" \
   "$HOME/Library/LaunchAgents/com.brew-ai-update-agent.plist"
 ```
 
-`cp` tworzy lub nadpisuje wdrozona konfiguracje. `bootstrap` rejestruje agenta w sesji biezacego uzytkownika. `$(id -u)` podstawia UID; nie kopiuj UID autora. Nie wykonuj bootstrap ponownie dla juz zaladowanej uslugi bez jej wczesniejszego wyladowania.
+Polecenie rejestruje usługę w sesji bieżącego użytkownika. Nie uruchamia `brew upgrade`.
 
-### 8. Sprawdz i uruchom test
+Jeżeli usługa jest już załadowana, najpierw ją wyładuj:
 
-```bash
-launchctl print "gui/$(id -u)/com.brew-ai-update-agent"
-launchctl kickstart "gui/$(id -u)/com.brew-ai-update-agent"
+```zsh
+launchctl bootout "gui/$(id -u)/com.brew-ai-update-agent"
 ```
 
-`print` tylko wyswietla stan. `kickstart` uruchamia prawdziwy przebieg: aktualizuje metadane Homebrew, zapisuje stan i moze wywolac AI. Pierwszy przebieg z pustym cache moze analizowac wszystkie pozycje.
+`bootout` może przerwać aktywny przebieg, dlatego wcześniej sprawdź status.
 
-Sprawdz log i raport zgodnie z kolejnym rozdzialem. Dopiero poprawny test z launchd potwierdza dzialanie w srodowisku harmonogramu.
+## Pierwszy test
 
-## Codzienna obsluga
+### Sprawdź status
 
-### Otworz raport
-
-```bash
-open -t "$HOME/Projects/tools/brew-ai-update-agent/state/latest-report.md"
+```zsh
+./scripts/status.sh
 ```
 
-`open -t` otwiera plik w domyslnym edytorze tekstowym. Nie wykonuje rekomendowanych komend.
+Oczekiwane informacje:
 
-Jesli masz polecenie `code`:
+- `LaunchAgent: LOADED`;
+- aktywny skrypt zgodny z `bin/brew-ai-update-agent.sh`;
+- harmonogram `Monday (Weekday 1) at 08:00`.
 
-```bash
-code "$HOME/Projects/tools/brew-ai-update-agent/state/latest-report.md"
+### Uruchom prawdziwy przebieg
+
+```zsh
+./scripts/run-now.sh --follow
 ```
 
-Otwiera raport w VS Code. Podglad Markdown: Cmd+Shift+V.
+Komenda:
 
-### Obserwuj log
+- zleca uruchomienie przez `launchd`;
+- może odświeżyć metadane Homebrew;
+- może wykorzystać kredyty GitHub Copilot;
+- nie wykonuje celowo `brew upgrade`;
+- pokazuje log na żywo.
 
-```bash
-tail -f "$HOME/Projects/tools/brew-ai-update-agent/state/agent.log"
+`Ctrl+C` zatrzymuje tylko podgląd logu, nie agenta.
+
+### Sprawdź wynik
+
+```zsh
+./scripts/status.sh
+./scripts/open-report.sh
 ```
 
-`tail -f` pokazuje koncowke i dopisywane linie. Ctrl+C konczy tylko podglad, nie agenta.
-
-### Uruchom teraz
-
-```bash
-launchctl kickstart "gui/$(id -u)/com.brew-ai-update-agent"
-```
-
-Uruchamia zarejestrowana usluge. Nie uruchamiaj rownolegle skryptu bezposrednio: oba przebiegi moglyby nadpisywac te same pliki.
-
-Wariant `kickstart -k` przerywa dzialajaca instancje i uruchamia nowa. Uzywaj go tylko przy swiadomym restarcie, nie jako sposobu sprawdzania postepu. Przerwanie moze zmarnowac rozpoczeta analize AI.
-
-### Zaktualizuj wybrany pakiet samodzielnie
-
-```bash
-brew upgrade gh
-```
-
-Aktualizuje wskazana formule i moze aktualizowac wymagane zaleznosci. To nie jest operacja tylko do odczytu ani gwarancja zmiany jednego pliku.
-
-```bash
-brew upgrade --cask visual-studio-code
-```
-
-Aktualizuje wskazany cask. Zamknij aplikacje i zapisz prace przed aktualizacja. Przejrzyj raport i informacje producenta.
-
-Agent sam nie wykonuje tych polecen. Po aktualizacji pozycja zniknie z kolejnego raportu, jesli Homebrew przestanie ja zwracac jako outdated.
-
-## Cache i koszty AI
-
-Klucz jest wyliczany z oczyszczonej linii, np.:
+Raport powinien powstać jako:
 
 ```text
-openjdk@17 (17.0.20.1) < 17.0.21.0.2
-  -> SHA-256
-  -> state/cache/<hash>.json
+state/latest-report.md
 ```
 
-Hash to identyfikator, nie szyfrowanie. Zawartosc cache pozostaje zwyklym JSON-em.
+## Helpery
 
-| Sytuacja | Zachowanie |
-|---|---|
-| Ta sama linia, swiezy cache | Ponownie pokazuje rekomendacje bez nowej analizy tej pozycji |
-| Zmieniona wersja zainstalowana lub docelowa | Nowy klucz, nowa analiza |
-| Brak cache | Analiza AI |
-| Cache starszy niz prog 28 dni | Ponowna analiza |
-| Pakiet nie jest juz outdated | Nie trafia do aktualnego raportu |
+Helpery same znajdują katalog projektu, więc można je uruchamiać z dowolnego katalogu.
 
-Wiek jest sprawdzany na podstawie czasu modyfikacji pliku. Kopiowanie lub migracja cache moze odswiezyc ten czas i przesunac kolejna analize. Nie jest to niezalezny znacznik czasu ostatniego researchu.
+### `status.sh`
 
-Jeden przebieg moze wyslac wiele nowych pozycji w jednym promptcie. Nie oznacza to stalego kosztu ani jednego kredytu. Research, model i dlugosc odpowiedzi moga wplywac na zuzycie.
+```zsh
+./scripts/status.sh
+```
 
-Nie ustawiono limitu `--max-ai-credits`, zgodnie z priorytetem kompletnej analizy. Nie gwarantuje to zakonczenia: pozostaja limity konta, sieci i bledy modelu.
+Pokazuje stan usługi, harmonogram, aktywny skrypt, raport i ostatni rezultat.
 
-## Format raportu
+Pełna definicja `launchctl`:
 
-- UPDATE: rekomendacja aktualizacji, nie gwarancja bezpieczenstwa.
-- REVIEW: potrzebne sprawdzenie zgodnosci lub dodatkowych informacji.
-- HOLD: konkretny potwierdzony powod do wstrzymania.
+```zsh
+./scripts/status.sh --raw
+```
 
-Kazdy wpis zawiera nazwe, wersje, klasyfikacje, ustalenia, powod, korzysci, ryzyka oraz kontrole przed i po.
+### `run-now.sh`
 
-`Pending updates` to liczba pozycji raportu. `AI analyses refreshed` to liczba pozycji skierowanych do AI w danym przebiegu, nie liczba wszystkich ocen ani rachunek za kredyty.
+```zsh
+./scripts/run-now.sh
+```
 
-**Wazne:** aktualny schemat nie wymusza adresow zrodel przy `confirmed_findings`. Samo slowo "verified" w odpowiedzi modelu nie dowodzi weryfikacji. Przy waznych decyzjach sprawdz oficjalne release notes. Zalecanym kolejnym ulepszeniem jest pole `sources` z URL-ami i data analizy.
+Zleca jeden przebieg przez `launchd` i wraca do terminala.
 
-Kontrole w raporcie sa propozycjami, nie automatycznie wykonywanymi testami. Nie kopiuj calego pola do terminala bez przegladania: moze laczyc komendy z opisem lub placeholderem. Testy projektowe moga wykonywac kod, pobierac zaleznosci i wymagac dostepu do sieci. `pnpm install` zmienia lokalne zaleznosci; `tflint --init` pobiera pluginy; polecenia planowania moga korzystac z infrastruktury i uwierzytelnienia. Nie sa uniwersalnie operacjami bez skutkow ubocznych.
+```zsh
+./scripts/run-now.sh --follow
+```
+
+Zleca przebieg i przechodzi do podglądu logu. Jeżeli agent już działa, helper nie uruchamia drugiej instancji.
+
+### `show-log.sh`
+
+Ostatnie 40 linii i śledzenie nowych wpisów:
+
+```zsh
+./scripts/show-log.sh
+```
+
+Ostatnie 100 linii bez śledzenia:
+
+```zsh
+./scripts/show-log.sh --no-follow --lines 100
+```
+
+### `open-report.sh`
+
+Otwórz raport:
+
+```zsh
+./scripts/open-report.sh
+```
+
+Wyświetl raport w terminalu:
+
+```zsh
+./scripts/open-report.sh --print
+```
+
+Wyświetl ścieżkę:
+
+```zsh
+./scripts/open-report.sh --path
+```
+
+## Interpretacja raportu
+
+### 🟢 UPDATE
+
+Aktualizacja jest rekomendowana, ale użytkownik nadal powinien sprawdzić wpływ na swoje projekty.
+
+### 🟡 REVIEW
+
+Przed aktualizacją należy sprawdzić kompatybilność, release notes albo wpływ na lokalny toolchain.
+
+### 🔴 HOLD
+
+Istnieje konkretny powód, aby tymczasowo wstrzymać aktualizację.
+
+Klasyfikacja AI jest rekomendacją, nie gwarancją. Dla krytycznych narzędzi zawsze sprawdzaj oficjalne release notes i wykonuj właściwe testy.
+
+## Cache i wykorzystanie Copilot CLI
+
+Agent zapisuje analizy zmian wersji w `state/cache/`. Ta sama świeża analiza może zostać użyta ponownie. Nowa zmiana wersji, brak cache lub przeterminowany cache powodują ponowną analizę.
+
+Pierwszy przebieg z pustym cache może skierować do AI wszystkie wykryte aktualizacje. Liczba pozycji w raporcie nie jest tym samym co liczba analiz wykonanych w danym przebiegu.
+
+Nie udostępniaj cudzego cache. Każdy użytkownik powinien rozpocząć z własnym lokalnym stanem.
 
 ## Harmonogram
 
-Potwierdzona konfiguracja:
+Domyślna konfiguracja:
 
 ```text
 Weekday = 1
@@ -371,198 +322,162 @@ Hour = 8
 Minute = 0
 ```
 
-**Poniedzialek to 1. Niedziela to 0 lub 7. Nie zmieniaj poniedzialku na 2.** Wczesniejsza sugestia takiej zmiany byla bledna.
+Oznacza poniedziałek o 08:00. LaunchAgent działa w sesji zalogowanego użytkownika.
 
-Agent jest LaunchAgentem uzytkownika, nie usluga systemowa. Nie zakladaj wykonania, gdy komputer jest wylaczony lub uzytkownik wylogowany. Dokumentacja StartCalendarInterval opisuje laczenie pominietych zdarzen podczas uspienia w jedno wykonanie po obudzeniu. Nie jest to gwarancja wykonania o 08:00 na niedostepnym komputerze.
+## Aktualizacja konfiguracji
 
-Zmiana harmonogramu:
+Po zmianie plista przeładuj usługę:
 
-1. Zmien `config/*.plist` w edytorze.
-2. Sprawdz `plutil -lint`.
-3. Wyladuj aktywna usluge.
-4. Skopiuj konfiguracje do `~/Library/LaunchAgents`.
-5. Zarejestruj ja ponownie.
-6. Sprawdz `launchctl print`.
+```zsh
+./scripts/status.sh
 
-Komendy przeladowania:
-
-```bash
 launchctl bootout "gui/$(id -u)/com.brew-ai-update-agent"
-cp "$HOME/Projects/tools/brew-ai-update-agent/config/com.brew-ai-update-agent.plist" \
-   "$HOME/Library/LaunchAgents/com.brew-ai-update-agent.plist"
+
+PROJECT_ROOT="$(pwd -P)"
+sed "s|__PROJECT_ROOT__|$PROJECT_ROOT|g" \
+  config/com.brew-ai-update-agent.plist \
+  > "$HOME/Library/LaunchAgents/com.brew-ai-update-agent.plist"
+
+plutil -lint "$HOME/Library/LaunchAgents/com.brew-ai-update-agent.plist"
+
 launchctl bootstrap "gui/$(id -u)" \
   "$HOME/Library/LaunchAgents/com.brew-ai-update-agent.plist"
+
+./scripts/status.sh
 ```
-
-`bootout` wyladowuje usluge i moze przerwac aktywny przebieg. Wykonuj przeladowanie, gdy agent nie pracuje.
-
-## Bezpieczenstwo i ograniczenia
-
-### Granica odpowiedzialnosci
-
-Skrypt lokalny wykonuje Homebrew, zapisuje pliki i wyswietla powiadomienia. Model ma analizowac, nie administrowac komputerem.
-
-W znanej wersji wywolanie CLI laczy szerokie zezwolenia na narzedzia/URL-e z zakazami `shell` i `write`. GitHub opisuje pierwszenstwo regul deny. **Nie jest to sandbox ani dowod, ze kazdy mozliwy efekt uboczny jest zablokowany**, zwlaszcza przy dodatkowych MCP/pluginach. Przed udostepnieniem przejrzyj faktyczne wywolanie, konfiguracje CLI i ogranicz narzedzia do potrzebnego researchu. Nie dodawaj `--yolo`.
-
-### Dane wysylane do AI
-
-Prompt zawiera liste pakietow, wersje i opis toolchainu. To informacje o srodowisku pracy. Research moze wysylac nazwy i wersje do zewnetrznych serwisow. Przed uzyciem sluzbowym sprawdz zasady organizacji. Nie dodawaj sekretow, tokenow, danych klientow ani poufnego kodu do promptu.
-
-### Ograniczenia implementacji wymagajace uwagi
-
-- Poprawny JSON nie gwarantuje poprawnych faktow.
-- Sprawdzenie liczby obiektow i pol nie dowodzi poprawnego przypisania oceny do pakietu. Historyczny parser kojarzyl odpowiedzi po kolejnosci.
-- Nie nalezy traktowac fallbacku migracji jako dowodu zachowania tozsamosci wszystkich ocen.
-- Historyczne `outdated ... || true` moze ukrywac blad odczytu jako pusty wynik. Komunikat "up to date" wymaga ostroznosci, jesli Homebrew mial problemy.
-- Zapis wielu plikow cache nie jest pelna transakcja. Blad w polowie walidacji moze pozostawic czesc nowych wpisow.
-- Wczesniejsze wersje nie sprawdzaly konsekwentnie kodu zakonczenia generatora raportu. Sam komunikat `Complete` nie zastapi kontroli raportu.
-- Nie ma potwierdzonej rotacji logow, automatycznego sprzatania starego cache ani kompletnego mechanizmu ponawiania.
-- Nie zweryfikowano jeszcze calego finalnego kodu po migracji na drugim Macu.
-
-To lista jawnych ograniczen, nie twierdzenie, ze kazdy przebieg jest bledny. Przed szerszym wdrozeniem zalecane sa testy, atomowe zapisy, walidacja tozsamosci i jawne kody bledow.
 
 ## Diagnostyka
 
-### Agent nie wystartowal
+### Usługa nie jest załadowana
 
-```bash
-launchctl print "gui/$(id -u)/com.brew-ai-update-agent"
+```zsh
+./scripts/status.sh
+plutil -lint "$HOME/Library/LaunchAgents/com.brew-ai-update-agent.plist"
 ```
 
-Tylko odczyt. Sprawdz `arguments`, `state`, `runs`, `last exit code` i `event triggers`. `not running` jest normalne miedzy przebiegami. `runs = 0` po ponownym bootstrap nie oznacza, ze agent nigdy nie dzialal wczesniej.
+### Agent nie tworzy raportu
 
-### Ostatnie logi
-
-```bash
-tail -n 80 "$HOME/Projects/tools/brew-ai-update-agent/state/agent.log"
-tail -n 80 "$HOME/Projects/tools/brew-ai-update-agent/state/launchd.stderr.log"
+```zsh
+./scripts/status.sh
+./scripts/show-log.sh --no-follow --lines 100
+tail -n 100 state/launchd.stderr.log
+tail -n 100 state/launchd.stdout.log
 ```
 
-`-n 80` pokazuje ostatnich 80 linii, bez zmian w plikach. Stary blad przed najnowszym `Start` nie musi dotyczyc biezacego przebiegu.
+### `copilot` lub `brew` działa w terminalu, ale nie przez `launchd`
 
-### JSONDecodeError
+```zsh
+command -v copilot
+command -v brew
+command -v python3
+```
 
-Zachowaj `ai-output.json`, `pending.txt` i log przed kolejnym uruchomieniem. Nie wywoluj od razu AI ponownie: odpowiedz moze nadawac sie do odzyskania. Parser `strict=False` toleruje literalne znaki kontrolne w stringach, ale nie naprawia dowolnie uszkodzonego lub ucietego JSON-u.
+`launchd` ma ograniczone środowisko i może nie dziedziczyć pełnego `PATH` z terminala. Porównaj wyniki z konfiguracją używaną przez główny skrypt.
 
-### Liczba wpisow i znaki kontrolne
+### Kontrola znaków terminalowych w raporcie
 
-```bash
+```zsh
 python3 - <<'PY'
 from pathlib import Path
-p = Path.home() / 'Projects/tools/brew-ai-update-agent/state/latest-report.md'
-s = p.read_text()
-print('ESC:', s.count('\x1b'))
-print('BEL:', s.count('\x07'))
-print('Entries:', sum(line.startswith('### ') for line in s.splitlines()))
+
+report = Path("state/latest-report.md")
+text = report.read_text(encoding="utf-8")
+
+print("ESC:", text.count("\x1b"))
+print("BEL:", text.count("\x07"))
+print("Entries:", sum(line.startswith("### ") for line in text.splitlines()))
 PY
 ```
 
-Czyta raport i liczy naglowki oraz znaki sterujace. Niczego nie zapisuje i nie wywoluje AI. Zero ESC/BEL jest pozadane. Liczba naglowkow nie dowodzi unikalnosci ani prawdziwosci rekomendacji.
+Oczekiwane wartości `ESC` i `BEL` to `0`.
 
-### Brak powiadomienia
+## Bezpieczeństwo
 
-Najpierw sprawdz raport i log. Brak bannera nie dowodzi bledu analizy. Sprawdz ustawienia powiadomien macOS i tryb skupienia. Powiadomienie nie jest jedynym kanalem wyniku.
+Agent nie powinien wykonywać `brew upgrade`. Użytkownik sam decyduje o instalacji, na przykład:
 
-## Udostepnianie projektu
-
-Udostepniaj kod i dokumentacje, nie osobisty stan dzialania.
-
-Zalecany zakres:
-
-- `README.md`;
-- aktualny `bin/brew-ai-update-agent.sh`;
-- zanonimizowana konfiguracja w `config/`;
-- ewentualne testy i rzeczywiscie istniejace skrypty instalacyjne.
-
-Nie udostepniaj domyslnie:
-
-- `state/` i `archive/`;
-- tokenow i konfiguracji uwierzytelnienia;
-- prywatnych logow, promptow i odpowiedzi AI;
-- konfiguracji z cudza sciezka `/Users/...`;
-- historycznych patchy jako rzekomego instalatora.
-
-Proponowana zawartosc `.gitignore`:
-
-```gitignore
-state/
-archive/
-.DS_Store
-*.log
-.env
-.env.*
+```zsh
+brew upgrade gh
 ```
 
-To propozycja do zapisania w repozytorium, nie automatycznie zastosowana konfiguracja. `.gitignore` nie usuwa plikow juz sledzonych przez Git.
+To polecenie zmienia system i może aktualizować zależności. Przed wykonaniem sprawdź raport oraz oficjalne informacje o wydaniu.
 
-Kontrola przed commitem:
+Prompt AI może zawierać nazwy pakietów, wersje i opis toolchainu. Nie dodawaj do niego tokenów, haseł, danych klientów, poufnego kodu ani prywatnych adresów repozytoriów.
 
-```bash
+Przed użyciem na komputerze służbowym upewnij się, że GitHub Copilot CLI jest zgodny z zasadami organizacji.
+
+## Przygotowanie projektu do udostępnienia
+
+Do repozytorium powinny trafić:
+
+```text
+README.md
+.gitignore
+bin/
+config/
+scripts/
+```
+
+Nie publikuj:
+
+```text
+state/
+archive/
+.env
+.env.*
+*.log
+.DS_Store
+```
+
+Przed commitem:
+
+```zsh
+grep -RIn \
+  --exclude-dir='.git' \
+  --exclude-dir='state' \
+  --exclude-dir='archive' \
+  -E '/Users/[^/]+/' . || true
+
+for file in bin/*.sh scripts/*.sh; do
+  /bin/zsh -n "$file" || exit 1
+  echo "OK: $file"
+done
+
+plutil -lint config/com.brew-ai-update-agent.plist
 git status --short
 git diff --cached
 ```
 
-Obie komendy tylko pokazuja stan/zmiany. Przejrzyj kazdy plik przed publikacja. Nie zakladaj, ze `git add .` jest bezpieczne bez kontroli zawartosci.
+Nie używaj bezrefleksyjnie `git add .`, jeżeli w katalogu znajdują się logi, lokalny cache, historyczne kopie lub odpowiedzi AI.
 
-Przed przekazaniem wspolpracownikom:
+## Wyłączenie i odinstalowanie
 
-- [ ] Sciezki sa przenosne albo opisane jako wymagajace konfiguracji.
-- [ ] Repozytorium nie zawiera stanu, tokenow ani osobistych backupow.
-- [ ] Kontekst toolchainu mozna dostosowac.
-- [ ] Uprawnienia CLI zostaly przejrzane.
-- [ ] Pierwszy przebieg z pustym cache dziala na drugim Macu.
-- [ ] Drugi przebieg wykorzystuje cache.
-- [ ] Zmieniona wersja uruchamia nowa analize.
-- [ ] Raport zawiera jedna ocene na kazda aktualizacje.
-- [ ] Poniedzialek pozostaje Weekday 1.
-- [ ] Zasady organizacji dopuszczaja taki sposob uzycia AI.
+Sprawdź, czy agent nie pracuje:
 
-## Wylaczenie i odinstalowanie
+```zsh
+./scripts/status.sh
+```
 
-Wylaczenie harmonogramu:
+Wyładuj usługę:
 
-```bash
+```zsh
 launchctl bootout "gui/$(id -u)/com.brew-ai-update-agent"
 ```
 
-Wyladowuje usluge, moze przerwac przebieg, nie usuwa raportow ani cache.
+Usuń aktywny plist:
 
-Aby nie ladowala sie ponownie przy kolejnej sesji, po wyladowaniu przenies aktywna konfiguracje poza `LaunchAgents`:
-
-```bash
-mv "$HOME/Library/LaunchAgents/com.brew-ai-update-agent.plist" \
-   "$HOME/Projects/tools/brew-ai-update-agent/config/com.brew-ai-update-agent.disabled.plist"
+```zsh
+rm "$HOME/Library/LaunchAgents/com.brew-ai-update-agent.plist"
 ```
 
-Przenosi jeden plik; nie usuwa kodu ani danych. Nie wykonuj, jesli plik docelowy juz istnieje i chcesz go zachowac.
+`rm` usuwa tylko zainstalowaną konfigurację. Nie usuwa projektu, raportów ani cache.
 
-Nie trzeba odinstalowywac Homebrew, Pythona ani Copilota, aby usunac agenta. Katalog projektu usuwaj dopiero po zachowaniu potrzebnych raportow i sprawdzeniu sciezki. README celowo nie podaje zbiorczego `rm -rf`.
+## Pomoc
 
-## Slownik i zrodla
+Każdy helper obsługuje `--help`:
 
-- **CLI**: program obslugiwany z terminala.
-- **LaunchAgent**: zadanie macOS powiazane z sesja uzytkownika.
-- **plist**: plik konfiguracji property list.
-- **cache**: zapis poprzedniej oceny do ponownego wykorzystania.
-- **SHA-256**: funkcja tworzaca stabilny identyfikator z danych.
-- **JSON**: struktura danych dla parsera.
-- **Markdown**: tekstowy format raportu.
-- **OSC/ANSI/BEL**: znaki/sekwencje terminalowe, nie czesc nazwy pakietu.
-- **research**: wyszukiwanie informacji; nie gwarancja poprawnosci modelu.
-
-Zrodla dokumentacji narzedzi:
-
-- [Homebrew: dokumentacja polecen](https://docs.brew.sh/Manpage)
-- [GitHub: instalacja Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli)
-- [GitHub: zezwalanie i blokowanie narzedzi](https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli/allowing-tools)
-- [GitHub: konfiguracja Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/configure-copilot-cli)
-- [StartCalendarInterval: opis i numeracja dni](https://alvinalexander.com/mac-os-x/launchd-plist-examples-startinterval-startcalendarinterval/)
-
-Lokalne podreczniki macOS, tylko odczyt:
-
-```bash
-man launchd.plist
-man launchctl
+```zsh
+./scripts/open-report.sh --help
+./scripts/run-now.sh --help
+./scripts/show-log.sh --help
+./scripts/status.sh --help
 ```
-
-`man` otwiera dokumentacje dostepna na konkretnym Macu; `q` zamyka podglad. Przy roznicach wersji sprawdz lokalna dokumentacje oraz `copilot --help`.
